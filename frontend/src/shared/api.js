@@ -1,6 +1,6 @@
 import { getToken } from "./auth.js";
 
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || (import.meta.env.PROD ? "" : "http://localhost:5000");
 
 async function request(path, options = {}) {
   const headers = options.headers ? { ...options.headers } : {};

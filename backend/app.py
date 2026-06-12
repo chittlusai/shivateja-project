@@ -2,7 +2,7 @@ import os
 import re
 from datetime import timedelta
 
-from flask import Flask, send_from_directory
+from flask import Flask, send_from_directory, request
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager
 from dotenv import load_dotenv
@@ -20,7 +20,7 @@ from routes.user import user_bp
 def create_app():
     load_dotenv()
 
-    app = Flask(__name__)
+    app = Flask(__name__, static_folder="../frontend/dist", static_url_path="/")
 
     base_dir = os.path.abspath(os.path.dirname(__file__))
     upload_root = os.path.join(base_dir, "uploads")
@@ -59,7 +59,7 @@ def create_app():
     app.register_blueprint(property_bp, url_prefix="/api")
     app.register_blueprint(user_bp, url_prefix="/api")
 
-    @app.get("/")
+    @app.get("/api/health")
     def health_check():
         return {
             "message": "Hotel Guest ID Management backend is running",
@@ -71,6 +71,16 @@ def create_app():
                 "properties": "/api/properties",
             },
         }
+
+    @app.errorhandler(404)
+    def not_found(e):
+        if request.path.startswith('/api/') or request.path.startswith('/uploads/'):
+            return {"message": "Not Found"}, 404
+        return send_from_directory(app.static_folder, "index.html")
+        
+    @app.get("/")
+    def index():
+        return send_from_directory(app.static_folder, "index.html")
 
     @app.get("/uploads/<path:filename>")
     def uploaded_file(filename):
