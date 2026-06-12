@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+
+# Environment variables (contains API keys!)
+.env
+
+# Database
+*.db
+
+# Uploads
+backend/uploads/
+
+# IDE
+.vscode/
+.idea/
+.refact/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+dist/
+build/
+
+# Mock test files
+mock_aadhaar.png
