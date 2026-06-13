@@ -163,10 +163,6 @@ def allowed_file(filename):
 @guest_bp.post("/guest/extract-id")
 @jwt_required()
 def extract_id():
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        return jsonify({"message": "Gemini API key is not configured in the backend .env file."}), 501
-
     if "front_image" not in request.files:
         return jsonify({"message": "No front_image file provided"}), 400
 
@@ -178,50 +174,106 @@ def extract_id():
         return jsonify({"message": "File type not allowed. Must be jpg, jpeg, or png."}), 400
 
     try:
-        import google.generativeai as genai
-        import json
-
-        genai.configure(api_key=api_key)
+        import requests
+        import re
 
         file_bytes = file.read()
-        extension = file.filename.rsplit(".", 1)[1].lower()
-        mime_type = "image/png" if extension == "png" else "image/jpeg"
-
-        image_part = {
-            "mime_type": mime_type,
-            "data": file_bytes
-        }
-
-        prompt = """
-        You are an assistant for a hotel reception desk. Analyze the uploaded ID card image.
-        This could be the FRONT or BACK side of an Aadhaar card, Driving License, Passport, or Voter ID.
         
-        Extract the following details as a JSON object:
-        - guest_name: The full name of the guest. Look for names in English or Hindi. If not visible, set to empty string.
-        - id_number: The identification number (Aadhaar 12-digit number, DL number, Passport number, Voter ID EPIC number). Format nicely. If not visible, set to empty string.
-        - address: The full address of the guest. On Aadhaar cards, the address is usually on the BACK side and starts after "Address:" or "पता:". Extract the complete address including village/town, district, state, and pincode. If not visible, set to empty string.
-        - id_type: The type of ID. Must be one of: "Aadhaar", "Driving License", "Passport", "Voter ID". If unclear, set to "Aadhaar".
-        
-        IMPORTANT: Extract ALL visible text fields. Even partial information is useful.
-        Return ONLY a JSON object matching this schema. Do not wrap it in markdown.
-        """
-
-        model = genai.GenerativeModel('gemini-2.5-flash')
-        response = model.generate_content(
-            [image_part, prompt],
-            generation_config={"response_mime_type": "application/json"}
+        # Call OCR.space completely free API
+        response = requests.post(
+            "https://api.ocr.space/parse/image",
+            data={"apikey": "helloworld", "language": "eng", "isOverlayRequired": False},
+            files={"image": (file.filename, file_bytes, "image/jpeg")}
         )
-
-        data = json.loads(response.text)
-
-        result = {
-            "guest_name": data.get("guest_name", "").strip(),
-            "id_number": data.get("id_number", "").strip(),
-            "address": data.get("address", "").strip(),
-            "id_type": data.get("id_type", "Aadhaar")
+        
+        if response.status_code != 200:
+            return jsonify({"message": "Failed to connect to free OCR service"}), 500
+            
+        result = response.json()
+        if result.get("IsErroredOnProcessing"):
+            return jsonify({"message": result.get("ErrorMessage", ["Image processing error"])[0]}), 500
+            
+        parsed_results = result.get("ParsedResults", [])
+        if not parsed_results:
+            return jsonify({"message": "No readable text found in image"}), 400
+            
+        text = parsed_results[0].get("ParsedText", "")
+        text_upper = text.upper()
+        
+        data = {
+            "guest_name": "",
+            "id_number": "",
+            "address": "",
+            "id_type": "Aadhaar"
         }
+        
+        # ID Type Detection
+        if "ELECTION COMMISSION" in text_upper or "ELECTOR" in text_upper:
+            data["id_type"] = "Voter ID"
+        elif "DRIVING LICENCE" in text_upper or "TRANSPORT" in text_upper:
+            data["id_type"] = "Driving License"
+        elif "PASSPORT" in text_upper or "REPUBLIC OF INDIA" in text_upper:
+            data["id_type"] = "Passport"
+        else:
+            data["id_type"] = "Aadhaar"
+            
+        # ID Number Extraction
+        if data["id_type"] == "Aadhaar":
+            match = re.search(r'\b\d{4}\s?\d{4}\s?\d{4}\b', text)
+            if match:
+                raw_num = match.group(0).replace(" ", "")
+                data["id_number"] = f"{raw_num[:4]} {raw_num[4:8]} {raw_num[8:]}"
+        elif data["id_type"] == "Voter ID":
+            match = re.search(r'\b[A-Z]{3}[0-9]{7}\b', text_upper)
+            if match: data["id_number"] = match.group(0)
+        elif data["id_type"] == "Driving License":
+            match = re.search(r'\b[A-Z]{2}[0-9]{2}[A-Z0-9\s-]{11,14}\b', text_upper)
+            if match: data["id_number"] = match.group(0)
+        elif data["id_type"] == "Passport":
+            match = re.search(r'\b[A-Z][0-9]{7}\b', text_upper)
+            if match: data["id_number"] = match.group(0)
+            
+        # Address Extraction
+        addr_match = re.search(r'(?:ADDRESS|ADD|Add\.|Address:)\s*(.*?)(?:\n\n|\r\n\r\n|$)', text, re.IGNORECASE | re.DOTALL)
+        if addr_match:
+            addr = addr_match.group(1).replace('\r', '').replace('\n', ' ').strip()
+            data["address"] = re.sub(r'\s+', ' ', addr)
+            
+        # Name Extraction Heuristics
+        name_match = None
+        if data["id_type"] == "Voter ID":
+            name_match = re.search(r"Name[:\-\s]+([A-Za-z\s]{3,40})(?:\n|\r|Father|Husband)", text, re.IGNORECASE)
+        elif data["id_type"] == "Driving License":
+            name_match = re.search(r"Name[:\-\s]+([A-Za-z\s]{3,40})(?:\n|\r|S/D/W)", text, re.IGNORECASE)
+        elif data["id_type"] == "Passport":
+            surname_match = re.search(r"Surname[\s\n\r:]+([A-Za-z\s]+)", text, re.IGNORECASE)
+            given_match = re.search(r"Given Name\(s\)[\s\n\r:]+([A-Za-z\s]+)", text, re.IGNORECASE)
+            if surname_match and given_match:
+                data["guest_name"] = f"{given_match.group(1).strip()} {surname_match.group(1).strip()}"
+        
+        # Fallback for Aadhaar or if above failed
+        if not data["guest_name"]:
+            if name_match:
+                data["guest_name"] = name_match.group(1).strip()
+            else:
+                lines = [line.strip() for line in text.split('\n') if len(line.strip()) > 2]
+                for i, line in enumerate(lines):
+                    if "DOB" in line.upper() or "YOB" in line.upper() or "YEAR OF BIRTH" in line.upper():
+                        if i > 0:
+                            potential_name = lines[i-1]
+                            clean_name = re.sub(r'[^A-Za-z\s]', '', potential_name).strip()
+                            if len(clean_name) > 2 and clean_name.upper() not in ["INDIA", "GOVERNMENT OF INDIA", "MERA AADHAAR"]:
+                                data["guest_name"] = clean_name
+                                break
 
-        return jsonify(result), 200
+        # Name is hard to extract with just Regex reliably, so we provide best-effort for ID and Address.
+
+        print("===== OCR TEXT =====")
+        print(text)
+        print("===== EXTRACTED DATA =====")
+        print(data)
+
+        return jsonify(data), 200
 
     except Exception as e:
         current_app.logger.error(f"Error in extract_id: {str(e)}")
